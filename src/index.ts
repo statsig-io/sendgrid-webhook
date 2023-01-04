@@ -36,23 +36,17 @@ export default {
   convertEventToExposure(
     evt: Record<string, unknown>,
   ): Record<string, unknown> | null {
-    if (!evt.user || !evt.metadata || typeof evt.metadata !== 'object') {
+    if (!evt.user) {
       return null;
     }
-    const experimentPath = (evt.metadata as any).singlesend_name;
-    if (!experimentPath || typeof experimentPath !== 'string') {
+    const expDetails = this.getExperimentDetails(evt);
+    if (!expDetails || expDetails.length !== 2) {
       return null;
     }
-    const paths = experimentPath.split('/');
-    if (paths.length !== 2) {
-      return null;
-    }
-    const variant = paths[1].toLowerCase() === 'test' ? 'Test' : 'Control';
-    
     return {
       user: evt.user,
-      experimentName: paths[0],
-      group: variant,
+      experimentName: expDetails[0],
+      group: expDetails[1],
     };
   },
 
@@ -92,6 +86,32 @@ export default {
   getApiKey(request: Request): string | null {
     const url = new URL(request.url);
     return url.searchParams.get('apikey');    
+  },
+
+  getExperimentDetails(evt: Record<string, unknown>): Array<string> | null {
+    if (!evt.user || !evt.metadata || typeof evt.metadata !== 'object') {
+      return null;
+    }
+    const metadata = evt.metadata as any;
+    const experimentName = metadata.statsig_experiment_name;
+    const variantName = metadata.statsig_variant_name;
+    if (experimentName && variantName) {
+      return [experimentName, variantName];
+    }
+
+    // Fallback is a path stored in single send name
+    const experimentPath = metadata.singlesend_name;
+    if (!experimentPath || typeof experimentPath !== 'string') {
+      return null;
+    }
+    const paths = experimentPath.split('/');
+    if (paths.length !== 2) {
+      return null;
+    }
+    let variant = paths[1].toLowerCase();
+    variant = (variant === 'test' ? 'Test' : variant);
+    variant = (variant === 'control' ? 'Control' : variant);
+    return [paths[0], variant];
   },
 
   getHash(text: any): string {
@@ -137,7 +157,7 @@ export default {
   ) {
     try {
       const resp = await fetch(
-        `https://events.statsigapi.net/v1/${endpoint}`, 
+        `https://events.statsigapi.net/v1/${endpoint}`,
         {
           method: 'POST',      
           headers: {
@@ -148,7 +168,8 @@ export default {
         },
       );
       if (!resp.ok) {
-        console.log('Scrapi POST failed');
+        const errorText = await resp.text();
+        console.log(`Scrapi POST failed\n${errorText}`);
       }
     } catch (err: any) {
       console.log(err);
@@ -170,11 +191,13 @@ export default {
         exposures.push(exp);
       }
     }
-    await this.postToScrapi(
-      'log_custom_exposure',
-      apiKey,
-      { exposures },
-    );
+    if (exposures.length > 0) {
+      await this.postToScrapi(
+        'log_custom_exposure',
+        apiKey,
+        { exposures },
+      );
+    }
   },
 
   async processWebhook(apiKey: string, payload: unknown): Promise<Response> {
