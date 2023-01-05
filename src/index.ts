@@ -57,9 +57,15 @@ export default {
     const evt = {} as Record<string, unknown>;
     evt.eventName = item.event;
     evt.time = item.timestamp;
+    const sid = this.getHash(item.email);
     evt.user = {
-      userID: this.getHash(item.email),
+      userID: sid,
       email: item.email,
+      user: {
+        customIDs: {
+          stableID: sid,
+        }
+      },
     };
     evt.metadata = this.normalizeMetadata(item);
     return evt;
