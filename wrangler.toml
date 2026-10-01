@@ -1,3 +1,7 @@
 name = "sendgrid-webhook"
 main = "src/index.ts"
 compatibility_date = "2023-01-01"
+
+# Secret JSON map of Statsig SDK key -> SendGrid event-webhook verification
+# public key (PEM). Not read from the request. Set with:
+#   wrangler secret put SENDGRID_VERIFICATION_KEYS

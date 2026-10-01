@@ -7,8 +7,10 @@
     "wrangler": "2.0.1"
   },
   "private": true,
+  "type": "module",
   "scripts": {
     "start": "wrangler dev",
-    "publish": "wrangler publish"
+    "publish": "wrangler publish",
+    "test": "node --experimental-strip-types --test src/webhook.test.ts"
   }
 }

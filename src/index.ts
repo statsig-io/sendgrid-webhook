@@ -8,30 +8,75 @@
  * Learn more at https://developers.cloudflare.com/workers/
  */
 
-export default {
-  async fetch(request: Request): Promise<Response> {
-    if (request.method !== 'POST') {
-      return new Response('Invalid request', {
-        status: 405,
-      });
-    }
+import {
+  SIGNATURE_HEADER,
+  TIMESTAMP_HEADER,
+  parseVerificationKeys,
+  readApiKey,
+  verifySendGridSignature,
+} from './auth.ts';
 
-    const apiKey = this.getApiKey(request);
-    if (!apiKey) {
-      return new Response('Unauthorized', {
-        status: 401,
-      });
-    }
+export interface Env {
+  SENDGRID_VERIFICATION_KEYS?: string;
+}
 
-    try {
-      const payload = await request.json();
-      return await this.processWebhook(apiKey, payload);
-    } catch {
-      return new Response('Invalid request', {
-        status: 400,
-      });
-    }
-  },
+const EVENTS_API = 'https://events.statsigapi.net/v1';
+
+function unauthorized(): Response {
+  return new Response('Unauthorized', { status: 401 });
+}
+
+function responseForUpstreamStatus(status: number): Response | null {
+  if (status >= 200 && status < 300) {
+    return null;
+  }
+  if (status === 401 || status === 403) {
+    return unauthorized();
+  }
+  return new Response('Upstream request failed', { status: 502 });
+}
+
+export async function handleSendGridWebhook(
+  request: Request,
+  env: Env = {},
+  fetchImpl: typeof fetch = fetch,
+): Promise<Response> {
+  if (request.method !== 'POST') {
+    return new Response('Invalid request', { status: 405 });
+  }
+
+  const apiKey = readApiKey(request.url);
+  if (!apiKey) {
+    return unauthorized();
+  }
+
+  const verificationKey = parseVerificationKeys(env.SENDGRID_VERIFICATION_KEYS)[apiKey];
+  if (!verificationKey) {
+    return unauthorized();
+  }
+
+  const rawBody = await request.text();
+  const signatureOk = await verifySendGridSignature(
+    verificationKey,
+    rawBody,
+    request.headers.get(SIGNATURE_HEADER),
+    request.headers.get(TIMESTAMP_HEADER),
+  );
+  if (!signatureOk) {
+    return unauthorized();
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    return new Response('Invalid request', { status: 400 });
+  }
+
+  return worker.processWebhook(apiKey, payload, fetchImpl);
+}
+
+const worker = {
 
   convertEventToExposure(
     evt: Record<string, unknown>,
@@ -89,9 +134,8 @@ export default {
     return events;
   },
 
-  getApiKey(request: Request): string | null {
-    const url = new URL(request.url);
-    return url.searchParams.get('apikey');    
+  async fetch(request: Request, env?: Env): Promise<Response> {
+    return handleSendGridWebhook(request, env ?? {});
   },
 
   getExperimentDetails(evt: Record<string, unknown>): Array<string> | null {
@@ -138,8 +182,12 @@ export default {
     return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
   },
 
-  async logEvents(apiKey: string, events: Array<Record<string, unknown>>) {
-    await this.postToScrapi('log_event', apiKey, { events });
+  async logEvents(
+    apiKey: string,
+    events: Array<Record<string, unknown>>,
+    fetchImpl: typeof fetch,
+  ): Promise<number> {
+    return this.postToScrapi('log_event', apiKey, { events }, fetchImpl);
   },
 
   normalizeMetadata(item: any): Record<string, string> {
@@ -160,12 +208,13 @@ export default {
     endpoint: string,
     apiKey: string,
     body: Record<string, unknown>,
-  ) {
+    fetchImpl: typeof fetch,
+  ): Promise<number> {
     try {
-      const resp = await fetch(
-        `https://events.statsigapi.net/v1/${endpoint}`,
+      const resp = await fetchImpl(
+        `${EVENTS_API}/${endpoint}`,
         {
-          method: 'POST',      
+          method: 'POST',
           headers: {
             'content-type': 'application/json',
             'statsig-api-key': apiKey,
@@ -174,21 +223,23 @@ export default {
         },
       );
       if (!resp.ok) {
-        const errorText = await resp.text();
-        console.log(`Scrapi POST failed\n${errorText}`);
+        console.log(`Scrapi POST failed status=${resp.status}`);
       }
-    } catch (err: any) {
-      console.log(err);
+      return resp.status;
+    } catch {
+      console.log('Scrapi POST failed');
+      return 502;
     }
   },
 
   async processExposures(
     apiKey: string,
-    events: Array<Record<string, unknown>>
-  ) {
+    events: Array<Record<string, unknown>>,
+    fetchImpl: typeof fetch,
+  ): Promise<number | null> {
     const expEvents = events.filter(evt => evt.eventName === 'delivered');
     if (expEvents.length === 0) {
-      return;
+      return null;
     }
     const exposures = [];
     for (let ii = 0; ii < expEvents.length; ii++) {
@@ -197,25 +248,45 @@ export default {
         exposures.push(exp);
       }
     }
-    if (exposures.length > 0) {
-      await this.postToScrapi(
-        'log_custom_exposure',
-        apiKey,
-        { exposures },
-      );
+    if (exposures.length === 0) {
+      return null;
     }
+    return this.postToScrapi(
+      'log_custom_exposure',
+      apiKey,
+      { exposures },
+      fetchImpl,
+    );
   },
 
-  async processWebhook(apiKey: string, payload: unknown): Promise<Response> {
+  async processWebhook(
+    apiKey: string,
+    payload: unknown,
+    fetchImpl: typeof fetch,
+  ): Promise<Response> {
     const events = this.convertToStatsigEvents(payload);
     if (events.length === 0) {
-      return new Response('Unexpected content format', { status: 406 });  
+      return new Response('Unexpected content format', { status: 406 });
     }
 
-    await this.logEvents(apiKey, events);
-    await this.processExposures(apiKey, events);
+    const logStatus = await this.logEvents(apiKey, events, fetchImpl);
+    const logFailure = responseForUpstreamStatus(logStatus);
+    if (logFailure) {
+      return logFailure;
+    }
+
+    const exposureStatus = await this.processExposures(apiKey, events, fetchImpl);
+    if (exposureStatus != null) {
+      const exposureFailure = responseForUpstreamStatus(exposureStatus);
+      if (exposureFailure) {
+        return exposureFailure;
+      }
+    }
+
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
     });
   },
 };
+
+export default worker;
