@@ -50,10 +50,11 @@ export async function handleSendGridWebhook(
     return unauthorized();
   }
 
-  const verificationKey = parseVerificationKeys(env.SENDGRID_VERIFICATION_KEYS)[apiKey];
-  if (!verificationKey) {
+  const verificationKeys = parseVerificationKeys(env.SENDGRID_VERIFICATION_KEYS);
+  if (!Object.prototype.hasOwnProperty.call(verificationKeys, apiKey)) {
     return unauthorized();
   }
+  const verificationKey = verificationKeys[apiKey];
 
   const rawBody = await request.text();
   const signatureOk = await verifySendGridSignature(

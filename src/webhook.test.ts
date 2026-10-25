@@ -85,6 +85,18 @@ test('rejects a dummy apikey even when the body is signed for another key', asyn
   );
 });
 
+test('rejects apikeys that name inherited object properties', async () => {
+  for (const key of ['constructor', '__proto__', 'toString']) {
+    await expectUnauthorized(
+      post(key, {
+        [SIGNATURE_HEADER]: signPayload(TIMESTAMP, BODY),
+        [TIMESTAMP_HEADER]: TIMESTAMP,
+      }),
+      enrolledEnv,
+    );
+  }
+});
+
 test('rejects a missing SendGrid signature', async () => {
   await expectUnauthorized(post(ENROLLED_KEY), enrolledEnv);
 });
